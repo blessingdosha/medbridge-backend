@@ -372,7 +372,7 @@ ALTER TABLE ONLY public.users
 --
 
 ALTER TABLE ONLY public.equipment
-    ADD CONSTRAINT equipment_hospital_id_fkey FOREIGN KEY (facility_id) REFERENCES public.hospitals(id) ON DELETE SET NULL;
+    ADD CONSTRAINT equipment_facility_id_fkey FOREIGN KEY (facility_id) REFERENCES public.facilities(id) ON DELETE SET NULL;
 
 
 --
@@ -403,3 +403,14 @@ ALTER TABLE ONLY public.equipment_requests
 -- PostgreSQL database dump complete
 --
 
+
+DROP TABLE IF EXISTS public.equipment_request_results CASCADE;
+CREATE TABLE public.equipment_request_results (
+    id SERIAL PRIMARY KEY,
+    equipment_request_id INTEGER REFERENCES public.equipment_requests(id) ON DELETE CASCADE,
+    diagnosis_findings TEXT,
+    notes_report TEXT,
+    attachment TEXT,
+    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);

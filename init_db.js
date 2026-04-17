@@ -8,6 +8,7 @@ async function initDB() {
     const schemaSql = fs.readFileSync(schemaPath, 'utf8');
     
     console.log('Running database schema creation...');
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
     await pool.query(schemaSql);
     console.log('Database schema created successfully!');
   } catch (err) {
