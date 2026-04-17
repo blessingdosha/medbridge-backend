@@ -1,11 +1,45 @@
-// seed.js
-// Run with: npm run seed
+/**
+ * Single source of truth for development data.
+ * Resets and repopulates tables used by the current API:
+ * users, hospitals, laboratories, facilities, equipment, equipment_requests,
+ * equipment_request_results.
+ *
+ * Run: npm run seed
+ * Requires .env DB_* variables. Destructive: truncates the tables above.
+ */
 
+const bcrypt = require("bcryptjs");
 const pool = require("./db");
 
 async function seed() {
+  const client = await pool.connect();
   try {
-    // 1. Seed hospitals
+    await client.query("BEGIN");
+
+    await client.query(`
+      TRUNCATE TABLE
+        equipment_request_results,
+        equipment_requests,
+        equipment,
+        facilities,
+        laboratories,
+        hospitals,
+        users
+      RESTART IDENTITY CASCADE
+    `);
+
+    const demoPassword = await bcrypt.hash("Password123!", 10);
+    await client.query(
+      `INSERT INTO users (name, email, password, role)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        "Demo Physician",
+        "doctor@medbridge.demo",
+        demoPassword,
+        "physician",
+      ],
+    );
+
     const hospitals = [
       {
         name: "General Hospital",
@@ -48,10 +82,11 @@ async function seed() {
         longitude: -74.002,
       },
     ];
-    const hospitalIds = [];
+
     for (const h of hospitals) {
-      const res = await pool.query(
-        "INSERT INTO hospitals (name, location, contact_email, contact_phone, facility_type, latitude, longitude) VALUES ($1, $2, $3, $4, 'hospital', $5, $6) RETURNING id",
+      await client.query(
+        `INSERT INTO hospitals (name, location, contact_email, contact_phone, facility_type, latitude, longitude)
+         VALUES ($1, $2, $3, $4, 'hospital', $5, $6)`,
         [
           h.name,
           h.location,
@@ -61,10 +96,8 @@ async function seed() {
           h.longitude,
         ],
       );
-      hospitalIds.push(res.rows[0].id);
     }
 
-    // 2. Seed laboratories
     const laboratories = [
       {
         name: "Central Lab",
@@ -112,10 +145,11 @@ async function seed() {
         services: ["Blood Test"],
       },
     ];
-    const laboratoryIds = [];
+
     for (const l of laboratories) {
-      const res = await pool.query(
-        "INSERT INTO laboratories (name, location, contact_email, contact_phone, facility_type, latitude, longitude, services) VALUES ($1, $2, $3, $4, 'laboratory', $5, $6, $7) RETURNING id",
+      await client.query(
+        `INSERT INTO laboratories (name, location, contact_email, contact_phone, facility_type, latitude, longitude, services)
+         VALUES ($1, $2, $3, $4, 'laboratory', $5, $6, $7)`,
         [
           l.name,
           l.location,
@@ -126,130 +160,317 @@ async function seed() {
           l.services,
         ],
       );
-      laboratoryIds.push(res.rows[0].id);
     }
 
-    // 3. Seed equipment
-    const equipment = [
+    const facilities = [
       {
-        name: "Ventilator",
-        type: "Respiratory",
-        hospital_id: hospitalIds[0],
-        availability: true,
-        description: "Advanced ventilator",
+        name: "Central Lab Facility",
+        address: "City Center",
+        contact_email: "centrallabfac@example.com",
+        contact_phone: "1111111111",
+        facility_type: "laboratory",
+        latitude: 40.7121,
+        longitude: -74.0011,
+        services: ["Blood Test", "Urine Test"],
       },
+      {
+        name: "West Diagnostic Facility",
+        address: "West End",
+        contact_email: "westdiagfac@example.com",
+        contact_phone: "2222222222",
+        facility_type: "laboratory",
+        latitude: 40.7132,
+        longitude: -74.0022,
+        services: ["X-Ray", "MRI"],
+      },
+      {
+        name: "East Health Facility",
+        address: "East Side",
+        contact_email: "easthealthfac@example.com",
+        contact_phone: "3333333333",
+        facility_type: "hospital",
+        latitude: 40.7143,
+        longitude: -74.0033,
+        services: ["Emergency", "Surgery"],
+      },
+      {
+        name: "North Path Facility",
+        address: "North District",
+        contact_email: "northpathfac@example.com",
+        contact_phone: "4444444444",
+        facility_type: "laboratory",
+        latitude: 40.7154,
+        longitude: -74.0044,
+        services: ["Biopsy"],
+      },
+      {
+        name: "Lakeside Facility",
+        address: "Lakeside",
+        contact_email: "lakesidefac@example.com",
+        contact_phone: "5555555555",
+        facility_type: "hospital",
+        latitude: 40.7165,
+        longitude: -74.0055,
+        services: ["Cardiology"],
+      },
+      {
+        name: "Sunrise Facility",
+        address: "East Side",
+        contact_email: "sunrisefac@example.com",
+        contact_phone: "6666666666",
+        facility_type: "laboratory",
+        latitude: 40.7176,
+        longitude: -74.0066,
+        services: ["CT Scan"],
+      },
+      {
+        name: "General Facility",
+        address: "City Center",
+        contact_email: "generalfac@example.com",
+        contact_phone: "8888888888",
+        facility_type: "hospital",
+        latitude: 40.7198,
+        longitude: -74.0088,
+        services: ["General Medicine"],
+      },
+      {
+        name: "St. Mary Facility",
+        address: "North District",
+        contact_email: "maryfac@example.com",
+        contact_phone: "9999999999",
+        facility_type: "hospital",
+        latitude: 40.7209,
+        longitude: -74.0099,
+        services: ["Orthopedics"],
+      },
+      {
+        name: "Harbor Facility",
+        address: "Lakeside",
+        contact_email: "harborfac@example.com",
+        contact_phone: "1212121212",
+        facility_type: "hospital",
+        latitude: 40.7221,
+        longitude: -74.0111,
+        services: ["Neurology"],
+      },
+      {
+        name: "Metro Facility",
+        address: "City Center",
+        contact_email: "metrofac@example.com",
+        contact_phone: "1313131313",
+        facility_type: "laboratory",
+        latitude: 40.7232,
+        longitude: -74.0122,
+        services: ["Genetics"],
+      },
+    ];
+
+    for (const f of facilities) {
+      await client.query(
+        `INSERT INTO facilities (name, address, contact_email, contact_phone, facility_type, latitude, longitude, services)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          f.name,
+          f.address,
+          f.contact_email,
+          f.contact_phone,
+          f.facility_type,
+          f.latitude,
+          f.longitude,
+          f.services,
+        ],
+      );
+    }
+
+    const { rows: facilityRows } = await client.query(
+      "SELECT id, name FROM facilities ORDER BY id",
+    );
+    const facilityId = Object.fromEntries(
+      facilityRows.map((r) => [r.name, r.id]),
+    );
+
+    const equipmentRows = [
       {
         name: "MRI Scanner",
         type: "Imaging",
-        hospital_id: hospitalIds[1],
+        facility: "West Diagnostic Facility",
         availability: true,
-        description: "High-res MRI",
+      },
+      {
+        name: "CT Scanner",
+        type: "Imaging",
+        facility: "Sunrise Facility",
+        availability: true,
       },
       {
         name: "X-Ray Machine",
         type: "Imaging",
-        hospital_id: hospitalIds[2],
+        facility: "East Health Facility",
         availability: false,
-        description: "Digital X-Ray",
       },
       {
-        name: "Ultrasound",
+        name: "Ultrasound Machine",
         type: "Imaging",
-        hospital_id: hospitalIds[3],
+        facility: "Lakeside Facility",
         availability: true,
-        description: "Portable ultrasound",
+      },
+      {
+        name: "Ventilator",
+        type: "Respiratory",
+        facility: "East Health Facility",
+        availability: true,
       },
       {
         name: "Defibrillator",
         type: "Cardiac",
-        hospital_id: hospitalIds[4],
+        facility: "General Facility",
         availability: true,
-        description: "Automated defibrillator",
       },
       {
         name: "ECG Machine",
         type: "Cardiac",
-        hospital_id: hospitalIds[0],
-        availability: false,
-        description: "12-lead ECG",
-      },
-      {
-        name: "Infusion Pump",
-        type: "IV",
-        hospital_id: hospitalIds[1],
+        facility: "St. Mary Facility",
         availability: true,
-        description: "Smart infusion pump",
       },
       {
         name: "Patient Monitor",
         type: "Monitoring",
-        hospital_id: hospitalIds[2],
+        facility: "Harbor Facility",
         availability: true,
-        description: "Multi-parameter monitor",
       },
       {
-        name: "Syringe Pump",
-        type: "IV",
-        hospital_id: hospitalIds[3],
+        name: "Blood Analyzer",
+        type: "Laboratory",
+        facility: "Central Lab Facility",
+        availability: true,
+      },
+      {
+        name: "Microscope Station",
+        type: "Laboratory",
+        facility: "North Path Facility",
         availability: false,
-        description: "Precision syringe pump",
       },
       {
-        name: "Oxygen Concentrator",
-        type: "Respiratory",
-        hospital_id: hospitalIds[4],
+        name: "Dialysis Machine",
+        type: "Other",
+        facility: "Metro Facility",
         availability: true,
-        description: "Portable oxygen concentrator",
+      },
+      {
+        name: "Portable X-Ray",
+        type: "Imaging",
+        facility: "West Diagnostic Facility",
+        availability: true,
       },
     ];
-    const equipmentIds = [];
-    for (const e of equipment) {
-      const res = await pool.query(
-        "INSERT INTO equipment (name, type, hospital_id, availability, description) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-        [e.name, e.type, e.hospital_id, e.availability, e.description],
+
+    const equipmentIdsByName = {};
+    for (const e of equipmentRows) {
+      const fid = facilityId[e.facility];
+      if (!fid) {
+        throw new Error(`Unknown facility for equipment: ${e.facility}`);
+      }
+      const ins = await client.query(
+        `INSERT INTO equipment (name, type, facility_id, availability)
+         VALUES ($1, $2, $3, $4) RETURNING id, name`,
+        [e.name, e.type, fid, e.availability],
       );
-      equipmentIds.push(res.rows[0].id);
+      equipmentIdsByName[e.name] = ins.rows[0].id;
     }
 
-    // 4. Seed equipment requests
-    const requests = [
+    const fromEast = facilityId["East Health Facility"];
+    const toWest = facilityId["West Diagnostic Facility"];
+    const fromGeneral = facilityId["General Facility"];
+    const toLakeside = facilityId["Lakeside Facility"];
+    const fromCentral = facilityId["Central Lab Facility"];
+    const toHarbor = facilityId["Harbor Facility"];
+    const fromStMary = facilityId["St. Mary Facility"];
+    const toMetro = facilityId["Metro Facility"];
+
+    const requestInserts = [
       {
-        requesting_hospital_id: hospitalIds[1],
-        equipment_id: equipmentIds[0],
-        notes: "Urgent need for ventilator",
+        equipment_id: equipmentIdsByName["Ventilator"],
+        from_facility: fromEast,
+        to_facility: toWest,
+        notes: "Urgent ICU ventilator share",
+        status: "pending",
+        quantity: 1,
       },
       {
-        requesting_hospital_id: hospitalIds[2],
-        equipment_id: equipmentIds[1],
+        equipment_id: equipmentIdsByName["MRI Scanner"],
+        from_facility: fromGeneral,
+        to_facility: toLakeside,
         notes: "MRI required for diagnosis",
+        status: "approved",
+        quantity: 1,
       },
       {
-        requesting_hospital_id: hospitalIds[3],
-        equipment_id: equipmentIds[2],
-        notes: "X-Ray needed for trauma case",
+        equipment_id: equipmentIdsByName["X-Ray Machine"],
+        from_facility: fromCentral,
+        to_facility: toHarbor,
+        notes: "Trauma bay imaging backup",
+        status: "rejected",
+        quantity: 2,
       },
       {
-        requesting_hospital_id: hospitalIds[4],
-        equipment_id: equipmentIds[3],
-        notes: "Ultrasound for maternity ward",
+        equipment_id: equipmentIdsByName["Ultrasound Machine"],
+        from_facility: fromStMary,
+        to_facility: toMetro,
+        notes: "Maternity ward ultrasound",
+        status: "pending",
+        quantity: 1,
       },
       {
-        requesting_hospital_id: hospitalIds[0],
-        equipment_id: equipmentIds[4],
-        notes: "Defibrillator for ER",
+        equipment_id: equipmentIdsByName["Patient Monitor"],
+        from_facility: toLakeside,
+        to_facility: fromEast,
+        notes: "Post-op monitoring loan",
+        status: "results-sent",
+        quantity: 3,
       },
     ];
-    for (const r of requests) {
-      await pool.query(
-        "INSERT INTO equipment_requests (requesting_hospital_id, equipment_id, notes) VALUES ($1, $2, $3)",
-        [r.requesting_hospital_id, r.equipment_id, r.notes],
+
+    let resultsSentRequestId = null;
+    for (const r of requestInserts) {
+      const res = await client.query(
+        `INSERT INTO equipment_requests (equipment_id, notes, from_facility, to_facility, status, quantity)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [
+          r.equipment_id,
+          r.notes,
+          r.from_facility,
+          r.to_facility,
+          r.status,
+          r.quantity,
+        ],
+      );
+      if (r.status === "results-sent") {
+        resultsSentRequestId = res.rows[0].id;
+      }
+    }
+
+    if (resultsSentRequestId != null) {
+      await client.query(
+        `INSERT INTO equipment_request_results (equipment_request_id, diagnosis_findings, notes_report, attachment)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          resultsSentRequestId,
+          "Vital signs stable; monitoring data reviewed.",
+          "Shared patient monitor returned with full telemetry export. No device faults reported.",
+          null,
+        ],
       );
     }
 
-    console.log("Seeding completed successfully.");
+    await client.query("COMMIT");
+    console.log("Seed completed.");
+    console.log("Demo login: doctor@medbridge.demo / Password123!");
   } catch (err) {
-    console.error("Seeding failed:", err);
+    await client.query("ROLLBACK");
+    console.error("Seed failed:", err.message);
+    process.exitCode = 1;
   } finally {
+    client.release();
     await pool.end();
   }
 }

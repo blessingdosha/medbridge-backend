@@ -33,6 +33,7 @@ const equipmentRoutes = require("./routes/equipment");
 const requestRoutes = require("./routes/requests");
 const authRoutes = require("./routes/auth");
 const facilitiesRoutes = require("./routes/facilities");
+const recommendationsRoutes = require("./routes/recommendations");
 
 // Mount routes
 app.use("/api/auth", authRoutes);
@@ -41,6 +42,7 @@ app.use("/api/laboratory", laboratoryRoutes);
 app.use("/api/equipment", equipmentRoutes);
 app.use("/api/requests", requestRoutes);
 app.use("/api/facilities", facilitiesRoutes);
+app.use("/api/recommendations", recommendationsRoutes);
 
 // Root route
 app.get("/", (req, res) => {
