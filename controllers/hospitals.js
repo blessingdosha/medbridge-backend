@@ -57,26 +57,64 @@ const getFacilitiesByType = async (req, res) => {
   }
 };
 
-// Get nearby facilities (for map feature)
+// Haversine distance in miles (Postgres), clamped for numeric safety
+const distanceMilesExpr = `(
+  3959 * acos(
+    least(1::float, greatest(-1::float,
+      cos(radians($1::float)) * cos(radians(latitude::float)) * cos(radians(longitude::float) - radians($2::float))
+      + sin(radians($1::float)) * sin(radians(latitude::float))
+    ))
+  )
+)`;
+
+// Get nearby hospitals and laboratories (for map / locator)
 const getNearbyFacilities = async (req, res) => {
   const { latitude, longitude, radius } = req.query;
-  
-  // Validate input parameters
+
   if (!latitude || !longitude || !radius) {
-    return res.status(400).json({ error: "Missing required parameters: latitude, longitude, radius" });
+    return res.status(400).json({
+      error: "Missing required parameters: latitude, longitude, radius",
+    });
   }
-  
+
   try {
     const result = await pool.query(
       `SELECT * FROM (
-        SELECT *, 
-         (3959 * acos(cos(radians($1)) * cos(radians(latitude)) * cos(radians(longitude) - radians($2)) + sin(radians($1)) * sin(radians(latitude)))) AS distance
-        FROM hospitals 
-        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-      ) AS facilities_with_distance
-      WHERE distance < $3
+        SELECT
+          h.id,
+          h.name,
+          h.location,
+          h.contact_email,
+          h.contact_phone,
+          h.facility_type,
+          h.latitude,
+          h.longitude,
+          h.created_at,
+          NULL::TEXT[] AS services,
+          'hospital' AS map_source,
+          ${distanceMilesExpr} AS distance
+        FROM hospitals h
+        WHERE h.latitude IS NOT NULL AND h.longitude IS NOT NULL
+        UNION ALL
+        SELECT
+          l.id,
+          l.name,
+          l.location,
+          l.contact_email,
+          l.contact_phone,
+          l.facility_type,
+          l.latitude,
+          l.longitude,
+          l.created_at,
+          l.services,
+          'laboratory' AS map_source,
+          ${distanceMilesExpr} AS distance
+        FROM laboratories l
+        WHERE l.latitude IS NOT NULL AND l.longitude IS NOT NULL
+      ) AS combined
+      WHERE distance < $3::float
       ORDER BY distance ASC`,
-      [latitude, longitude, radius]
+      [latitude, longitude, radius],
     );
     res.json(result.rows);
   } catch (err) {
