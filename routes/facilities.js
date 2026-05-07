@@ -1,9 +1,9 @@
 const express = require("express");
-const { addFacility, getFacilities } = require("../controllers/facilities");
+const { getFacilities } = require("../controllers/facilities");
+const { authenticate, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
 
-router.post("/", addFacility);
-router.get("/", getFacilities);
+router.get("/", authenticate, requireRole("super_admin"), getFacilities);
 
 module.exports = router;
