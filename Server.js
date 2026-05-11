@@ -4,10 +4,20 @@ const path = require("path");
 
 const app = express();
 
+const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:8080")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 // CORS middleware (updated)
 app.use(
   cors({
-    origin: "http://localhost:8080",
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -34,6 +44,9 @@ const requestRoutes = require("./routes/requests");
 const authRoutes = require("./routes/auth");
 const facilitiesRoutes = require("./routes/facilities");
 const recommendationsRoutes = require("./routes/recommendations");
+const adminRoutes = require("./routes/admin");
+const hospitalTeamRoutes = require("./routes/hospitalTeam");
+const patientRoutes = require("./routes/patients");
 
 // Mount routes
 app.use("/api/auth", authRoutes);
@@ -43,6 +56,9 @@ app.use("/api/equipment", equipmentRoutes);
 app.use("/api/requests", requestRoutes);
 app.use("/api/facilities", facilitiesRoutes);
 app.use("/api/recommendations", recommendationsRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/hospital/team", hospitalTeamRoutes);
+app.use("/api/patients", patientRoutes);
 
 // Root route
 app.get("/", (req, res) => {

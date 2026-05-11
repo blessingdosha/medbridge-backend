@@ -21,9 +21,7 @@ function normName(s) {
 }
 
 /**
- * Rule-based referral suggestions: proximity + equipment inventory.
- * Without keyword: hospitals & labs within radius (optionally boosted by name match to facilities).
- * With keyword: directory facilities that actually have matching equipment (avoids name mismatch with hospital/lab seeds).
+ * Rule-based referral suggestions based on hospitals only.
  */
 const getRecommendations = async (req, res) => {
   const lat = parseFloat(req.query.latitude);
@@ -31,62 +29,61 @@ const getRecommendations = async (req, res) => {
   const radius = parseFloat(req.query.radius);
   const q = String(req.query.q || "").trim();
 
-  const refLat = Number.isFinite(lat) ? lat : 40.7128;
-  const refLng = Number.isFinite(lng) ? lng : -74.006;
+  const refLat = Number.isFinite(lat) ? lat : 9.0765;
+  const refLng = Number.isFinite(lng) ? lng : 7.3986;
   const maxRadius = Number.isFinite(radius) && radius > 0 ? Math.min(radius, 500) : 50;
 
   try {
-    const [hospitalsResult, labsResult, equipRows] = await Promise.all([
+    const [hospitalsResult, equipRows] = await Promise.all([
       pool.query(
         `SELECT id, name, location, facility_type, latitude, longitude
            FROM hospitals
-           WHERE latitude IS NOT NULL AND longitude IS NOT NULL`,
+           WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+             AND COALESCE(registration_status, 'approved') = 'approved'`,
       ),
       pool.query(
-        `SELECT id, name, location, facility_type, latitude, longitude
-           FROM laboratories
-           WHERE latitude IS NOT NULL AND longitude IS NOT NULL`,
-      ),
-      pool.query(
-        `SELECT f.id AS facility_id, f.name AS fname,
+        `SELECT h.id AS hospital_id, h.name AS hname,
               COALESCE(SUM(CASE WHEN e.availability = true THEN 1 ELSE 0 END), 0)::int AS avail,
               COUNT(e.id)::int AS total
-           FROM facilities f
+           FROM hospitals h
+           LEFT JOIN facilities f ON f.hospital_id = h.id
            LEFT JOIN equipment e ON e.facility_id = f.id
-           GROUP BY f.id, f.name`,
+           GROUP BY h.id, h.name`,
       ),
     ]);
 
     const nameToEquip = new Map();
     for (const row of equipRows.rows) {
-      nameToEquip.set(normName(row.fname), {
+      nameToEquip.set(normName(row.hname), {
         avail: row.avail,
         total: row.total,
       });
     }
 
     if (q) {
-      const facilityMatch = await pool.query(
-        `SELECT f.id, f.name, f.address AS location, f.facility_type,
-            f.latitude, f.longitude,
+      const hospitalMatch = await pool.query(
+        `SELECT h.id, h.name, h.location, h.facility_type,
+            h.latitude, h.longitude,
             COALESCE(SUM(CASE WHEN e.availability = true THEN 1 ELSE 0 END), 0)::int AS avail,
             COUNT(e.id)::int AS total
-         FROM facilities f
+         FROM hospitals h
+         LEFT JOIN facilities f ON f.hospital_id = h.id
          INNER JOIN equipment e ON e.facility_id = f.id
-         WHERE f.latitude IS NOT NULL AND f.longitude IS NOT NULL
+         WHERE h.latitude IS NOT NULL AND h.longitude IS NOT NULL
+           AND COALESCE(h.registration_status, 'approved') = 'approved'
            AND strpos(lower(e.name), lower($1)) > 0
-         GROUP BY f.id, f.name, f.address, f.facility_type, f.latitude, f.longitude`,
+         GROUP BY h.id, h.name, h.location, h.facility_type, h.latitude, h.longitude`,
         [q],
       );
 
-      const withDist = facilityMatch.rows.map((r) => ({
+      const withDist = hospitalMatch.rows.map((r) => ({
         id: r.id,
         name: r.name,
         location: r.location,
         facility_type: r.facility_type,
         latitude: r.latitude,
         longitude: r.longitude,
-        map_source: "facility",
+        map_source: "hospital",
         distanceMi: haversineMiles(
           refLat,
           refLng,
@@ -99,21 +96,10 @@ const getRecommendations = async (req, res) => {
       }));
 
       withDist.sort((a, b) => a.distanceMi - b.distanceMi);
-      return finishScoring(res, withDist, nameToEquip);
+      return finishScoring(res, withDist, nameToEquip, true);
     }
 
-    const places = [
-      ...hospitalsResult.rows.map((r) => ({
-        ...r,
-        map_source: "hospital",
-      })),
-      ...labsResult.rows.map((r) => ({
-        ...r,
-        map_source: "laboratory",
-      })),
-    ];
-
-    const withDist = places
+    const withDist = hospitalsResult.rows
       .map((p) => {
         const distanceMi = haversineMiles(
           refLat,
@@ -125,13 +111,13 @@ const getRecommendations = async (req, res) => {
       })
       .filter((p) => p.distanceMi <= maxRadius);
 
-    return finishScoring(res, withDist, nameToEquip);
+    return finishScoring(res, withDist, nameToEquip, false);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 };
 
-function finishScoring(res, rows, nameToEquip) {
+function finishScoring(res, rows, nameToEquip, keywordMode) {
   const scored = rows
     .map((p) => {
       const equip = nameToEquip.get(normName(p.name)) || {
@@ -146,23 +132,19 @@ function finishScoring(res, rows, nameToEquip) {
       );
 
       const keyword = p.searchKeyword;
-      const reasonParts = keyword
+      const reasonParts = keywordMode
         ? [
             `Matched equipment keyword “${keyword}” in the directory at this site.`,
             `About ${d.toFixed(1)} mi from the reference point.`,
             `${p.keywordMatchAvail ?? equip.avail} available row(s) for matching equipment; ${p.keywordMatchTotal ?? equip.total} total matching line item(s).`,
-            p.facility_type === "laboratory"
-              ? "Laboratory: confirm test availability and turnaround with the site."
-              : "Hospital: confirm specialty services and capacity directly with the site.",
+            "Hospital: confirm specialty services and capacity directly with the site.",
           ]
         : [
             `About ${d.toFixed(1)} mi from the reference point.`,
             equip.avail > 0
               ? `${equip.avail} available equipment record(s) linked under the same facility name in the equipment directory.`
               : "No equipment rows are linked under that exact facility name yet; proximity and site type still support shortlisting.",
-            p.facility_type === "laboratory"
-              ? "Laboratory: useful for diagnostic referrals and shared imaging or lab capacity."
-              : "Hospital: confirm specialty services and bed capacity directly with the site.",
+            "Hospital: confirm specialty services and bed capacity directly with the site.",
           ];
 
       return {

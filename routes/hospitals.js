@@ -1,11 +1,17 @@
 const express = require("express");
-const { addHospital, getAllFacilities, getFacilitiesByType, getNearbyFacilities } = require("../controllers/hospitals");
+const {
+  addHospital,
+  getAllHospitals,
+  getHospitalById,
+  getNearbyHospitals,
+} = require("../controllers/hospitals");
+const { authenticate } = require("../middleware/auth");
 
 const router = express.Router();
 
-router.post("/", addHospital);
-router.get("/", getAllFacilities);
-router.get("/by-type", getFacilitiesByType);
-router.get("/nearby", getNearbyFacilities);
+router.post("/", authenticate, addHospital);
+router.get("/", authenticate, getAllHospitals);
+router.get("/nearby", authenticate, getNearbyHospitals);
+router.get("/:id", authenticate, getHospitalById);
 
 module.exports = router;

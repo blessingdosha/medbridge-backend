@@ -18,75 +18,96 @@ async function seed() {
 
     await client.query(`
       TRUNCATE TABLE
+        patient_shares,
+        patients,
         equipment_request_results,
         equipment_requests,
         equipment,
         facilities,
         laboratories,
-        hospitals,
-        users
+        users,
+        hospitals
       RESTART IDENTITY CASCADE
     `);
 
     const demoPassword = await bcrypt.hash("Password123!", 10);
     await client.query(
-      `INSERT INTO users (name, email, password, role)
-       VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO users (name, first_name, last_name, email, password, role, hospital_id, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, 'super_admin', NULL, false)`,
       [
-        "Demo Physician",
-        "doctor@medbridge.demo",
+        "Platform Admin",
+        "Platform",
+        "Admin",
+        "admin@medbridge.demo",
         demoPassword,
-        "physician",
       ],
     );
 
     const hospitals = [
       {
         name: "General Hospital",
-        location: "City Center",
+        location: "Wuse, Abuja",
+        city: "Abuja",
+        state: "FCT",
         contact_email: "genhosp@example.com",
         contact_phone: "1234567890",
-        latitude: 40.7128,
-        longitude: -74.006,
+        latitude: 9.0765,
+        longitude: 7.3986,
+        license_number: "LIC-SEED-GH-001",
       },
       {
         name: "St. Mary Clinic",
-        location: "North District",
+        location: "Garki, Abuja",
+        city: "Abuja",
+        state: "FCT",
         contact_email: "maryclinic@example.com",
         contact_phone: "2345678901",
-        latitude: 40.7138,
-        longitude: -74.005,
+        latitude: 9.0402,
+        longitude: 7.4891,
+        license_number: "LIC-SEED-SM-002",
       },
       {
         name: "Sunrise Medical",
-        location: "East Side",
+        location: "Maitama, Abuja",
+        city: "Abuja",
+        state: "FCT",
         contact_email: "sunrise@example.com",
         contact_phone: "3456789012",
-        latitude: 40.7148,
-        longitude: -74.004,
+        latitude: 9.0829,
+        longitude: 7.5116,
+        license_number: "LIC-SEED-SR-003",
       },
       {
         name: "Westside Health",
-        location: "West End",
+        location: "Asokoro, Abuja",
+        city: "Abuja",
+        state: "FCT",
         contact_email: "westside@example.com",
         contact_phone: "4567890123",
-        latitude: 40.7158,
-        longitude: -74.003,
+        latitude: 9.0436,
+        longitude: 7.5336,
+        license_number: "LIC-SEED-WH-004",
       },
       {
         name: "Lakeside Hospital",
-        location: "Lakeside",
+        location: "Jabi, Abuja",
+        city: "Abuja",
+        state: "FCT",
         contact_email: "lakeside@example.com",
         contact_phone: "5678901234",
-        latitude: 40.7168,
-        longitude: -74.002,
+        latitude: 9.0707,
+        longitude: 7.4383,
+        license_number: "LIC-SEED-LH-005",
       },
     ];
 
     for (const h of hospitals) {
       await client.query(
-        `INSERT INTO hospitals (name, location, contact_email, contact_phone, facility_type, latitude, longitude)
-         VALUES ($1, $2, $3, $4, 'hospital', $5, $6)`,
+        `INSERT INTO hospitals (
+          name, location, contact_email, contact_phone, facility_type, latitude, longitude,
+          license_number, registration_status, city, state
+        )
+         VALUES ($1, $2, $3, $4, 'hospital', $5, $6, $7, 'approved', $8, $9)`,
         [
           h.name,
           h.location,
@@ -94,6 +115,48 @@ async function seed() {
           h.contact_phone,
           h.latitude,
           h.longitude,
+          h.license_number,
+          h.city,
+          h.state,
+        ],
+      );
+    }
+
+    const { rows: ghRows } = await client.query(
+      "SELECT id FROM hospitals WHERE name = 'General Hospital' LIMIT 1",
+    );
+    const generalHospitalId = ghRows[0].id;
+
+    await client.query(
+      `INSERT INTO users (name, first_name, last_name, email, password, role, hospital_id, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, 'physician', $6, false)`,
+      [
+        "Demo Physician",
+        "Demo",
+        "Physician",
+        "doctor@medbridge.demo",
+        demoPassword,
+        generalHospitalId,
+      ],
+    );
+    for (const h of hospitals) {
+      const hosp = await client.query(
+        "SELECT id FROM hospitals WHERE name = $1 LIMIT 1",
+        [h.name],
+      );
+      const hid = hosp.rows[0]?.id;
+      if (!hid || h.name === "General Hospital") continue;
+      const slug = h.name.toLowerCase().replace(/[^a-z0-9]+/g, ".");
+      await client.query(
+        `INSERT INTO users (name, first_name, last_name, email, password, role, hospital_id, must_change_password)
+         VALUES ($1, $2, $3, $4, $5, 'physician', $6, false)`,
+        [
+          `Dr. ${h.name.split(" ")[0]} Physician`,
+          "Dr.",
+          h.name.split(" ")[0],
+          `doctor.${slug}@medbridge.demo`,
+          demoPassword,
+          hid,
         ],
       );
     }
@@ -282,6 +345,28 @@ async function seed() {
       );
     }
 
+    const facilityToHospital = [
+      ["Central Lab Facility", "General Hospital"],
+      ["West Diagnostic Facility", "Westside Health"],
+      ["East Health Facility", "Sunrise Medical"],
+      ["North Path Facility", "St. Mary Clinic"],
+      ["Lakeside Facility", "Lakeside Hospital"],
+      ["Sunrise Facility", "Sunrise Medical"],
+      ["General Facility", "General Hospital"],
+      ["St. Mary Facility", "St. Mary Clinic"],
+      ["Harbor Facility", "Lakeside Hospital"],
+      ["Metro Facility", "General Hospital"],
+    ];
+    for (const [facName, hospName] of facilityToHospital) {
+      await client.query(
+        `UPDATE facilities f
+         SET hospital_id = h.id
+         FROM hospitals h
+         WHERE f.name = $1 AND h.name = $2`,
+        [facName, hospName],
+      );
+    }
+
     const { rows: facilityRows } = await client.query(
       "SELECT id, name FROM facilities ORDER BY id",
     );
@@ -387,6 +472,18 @@ async function seed() {
     const fromStMary = facilityId["St. Mary Facility"];
     const toMetro = facilityId["Metro Facility"];
 
+    const { rows: doctorRows } = await client.query(
+      "SELECT id FROM users WHERE email = 'doctor@medbridge.demo' LIMIT 1",
+    );
+    const demoDoctorId = doctorRows[0]?.id ?? null;
+
+    const { rows: facilityHospitalRows } = await client.query(
+      "SELECT id, hospital_id FROM facilities",
+    );
+    const hospitalIdByFacilityId = Object.fromEntries(
+      facilityHospitalRows.map((row) => [row.id, row.hospital_id]),
+    );
+
     const requestInserts = [
       {
         equipment_id: equipmentIdsByName["Ventilator"],
@@ -432,9 +529,13 @@ async function seed() {
 
     let resultsSentRequestId = null;
     for (const r of requestInserts) {
+      const reqHospitalId = hospitalIdByFacilityId[r.from_facility] ?? null;
       const res = await client.query(
-        `INSERT INTO equipment_requests (equipment_id, notes, from_facility, to_facility, status, quantity)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        `INSERT INTO equipment_requests (
+          equipment_id, notes, from_facility, to_facility, status, quantity,
+          hospital_id, created_by_user_id
+        )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
         [
           r.equipment_id,
           r.notes,
@@ -442,6 +543,8 @@ async function seed() {
           r.to_facility,
           r.status,
           r.quantity,
+          reqHospitalId,
+          demoDoctorId,
         ],
       );
       if (r.status === "results-sent") {
@@ -464,7 +567,8 @@ async function seed() {
 
     await client.query("COMMIT");
     console.log("Seed completed.");
-    console.log("Demo login: doctor@medbridge.demo / Password123!");
+    console.log("Super admin: admin@medbridge.demo / Password123!");
+    console.log("Demo physician (General Hospital): doctor@medbridge.demo / Password123!");
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Seed failed:", err.message);
