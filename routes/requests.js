@@ -5,7 +5,8 @@ const {
   getAllRequests,
   updateRequestStatus,
   schedulePatientVisit,
-  downloadRequestReport,
+  downloadVisitSummary,
+  downloadClinicalResult,
   sendRequestResult,
   getRequestResult,
 } = require("../controllers/requests");
@@ -20,11 +21,15 @@ router.post("/", authenticate, requestEquipment);
 // Get all requests (scoped by hospital for non–super-admins)
 router.get("/", authenticate, getAllRequests);
 
-// Schedule patient visit (receiving hospital / admin)
+// Schedule patient visit (equipment-owning hospital / admin)
 router.patch("/:id/patient-visit", authenticate, schedulePatientVisit);
 
-// Download combined visit + report summary (.txt)
-router.get("/:id/report", authenticate, downloadRequestReport);
+// Download visit summary and clinical result as separate files
+router.get("/:id/visit-summary", authenticate, downloadVisitSummary);
+router.get("/:id/clinical-result", authenticate, downloadClinicalResult);
+
+// Single request (same placement as PATCH /:id — GET vs PATCH disambiguate)
+router.get("/:id", authenticate, getRequestById);
 
 // Update request status (protected)
 router.patch("/:id", authenticate, updateRequestStatus);

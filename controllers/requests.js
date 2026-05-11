@@ -3,16 +3,53 @@ const pool = require("../db");
 /** Shared row shape for authorization (facilities optional hospital link). */
 async function fetchRequestParties(requestId) {
   const r = await pool.query(
-    `SELECT er.id, er.hospital_id, er.status, er.from_facility, er.to_facility,
+    `SELECT er.id, er.hospital_id, er.status, er.from_facility, er.to_facility, er.equipment_id,
             rf.hospital_id AS from_facility_hospital_id,
             tf.hospital_id AS to_facility_hospital_id
      FROM equipment_requests er
      LEFT JOIN facilities rf ON er.from_facility = rf.id
      LEFT JOIN facilities tf ON er.to_facility = tf.id
-     WHERE er.id = $1`,
+     WHERE er.id = $1::integer`,
     [requestId],
   );
   return r.rows[0] || null;
+}
+
+/** Whether two booking windows [visit, release] intersect (null release = open-ended). */
+function bookingRangesOverlap(aVisit, aEnd, bVisit, bEnd) {
+  const sA = new Date(aVisit).getTime();
+  const sB = new Date(bVisit).getTime();
+  const eA = aEnd ? new Date(aEnd).getTime() : Number.POSITIVE_INFINITY;
+  const eB = bEnd ? new Date(bEnd).getTime() : Number.POSITIVE_INFINITY;
+  return sA < eB && sB < eA;
+}
+
+async function findVisitOverlapWarning(pool, equipmentId, excludeRequestId, visitStart, releaseEnd) {
+  const r = await pool.query(
+    `SELECT patient_visit_at, equipment_booking_end_at
+     FROM equipment_requests
+     WHERE equipment_id = $1::integer
+       AND id <> $2::integer
+       AND status IN ('approved', 'results-sent')
+       AND patient_visit_at IS NOT NULL`,
+    [equipmentId, excludeRequestId],
+  );
+  for (const row of r.rows) {
+    if (
+      bookingRangesOverlap(
+        visitStart,
+        releaseEnd,
+        row.patient_visit_at,
+        row.equipment_booking_end_at,
+      )
+    ) {
+      return (
+        "This visit window overlaps another approved booking for the same equipment. " +
+        "You can keep this schedule; coordinate with the other hospital if needed."
+      );
+    }
+  }
+  return null;
 }
 
 async function assertRequestAccess(req, requestId) {
@@ -93,29 +130,111 @@ async function ensureHospitalFacility(hospitalId) {
   return created.rows[0].id;
 }
 
-/** Only the receiving facility’s hospital (or super_admin) can set patient visit. */
+/** Only the equipment-owning hospital (from_facility) or super_admin can set patient visit. */
 async function assertScheduleAccess(req, requestId) {
   const access = await assertRequestAccess(req, requestId);
   if (!access.ok) {
     return access;
+  }
+  if (!["physician", "hospital_admin", "super_admin"].includes(req.user.role)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Only hospital doctors can schedule patient visits.",
+    };
   }
   if (req.user.role === "super_admin") {
     return { ok: true, row: access.row };
   }
   const uid =
     req.user.hospitalId != null ? Number(req.user.hospitalId) : null;
-  const toOrg =
-    access.row.to_facility_hospital_id != null
-      ? Number(access.row.to_facility_hospital_id)
+  const fromOrg =
+    access.row.from_facility_hospital_id != null
+      ? Number(access.row.from_facility_hospital_id)
       : null;
-  if (uid != null && toOrg != null && uid === toOrg) {
+  if (uid != null && fromOrg != null && uid === fromOrg) {
     return { ok: true, row: access.row };
   }
   return {
     ok: false,
     status: 403,
-    error: "Only the receiving hospital can set the patient visit.",
+    error: "Only the equipment-owning hospital can set the patient visit.",
   };
+}
+
+/** Only equipment-owning hospital (from_facility) or super_admin can approve/reject. */
+async function assertDecisionAccess(req, requestId) {
+  const access = await assertRequestAccess(req, requestId);
+  if (!access.ok) {
+    return access;
+  }
+  if (!["physician", "hospital_admin", "super_admin"].includes(req.user.role)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Only hospital doctors can approve or reject requests.",
+    };
+  }
+  if (req.user.role === "super_admin") {
+    return { ok: true, row: access.row };
+  }
+  const uid =
+    req.user.hospitalId != null ? Number(req.user.hospitalId) : null;
+  const fromOrg =
+    access.row.from_facility_hospital_id != null
+      ? Number(access.row.from_facility_hospital_id)
+      : null;
+  if (uid != null && fromOrg != null && uid === fromOrg) {
+    return { ok: true, row: access.row };
+  }
+  return {
+    ok: false,
+    status: 403,
+    error: "Only the equipment-owning hospital can approve or reject this request.",
+  };
+}
+
+async function assertResultsAccess(req, requestId) {
+  const access = await assertRequestAccess(req, requestId);
+  if (!access.ok) {
+    return access;
+  }
+  if (!["physician", "hospital_admin"].includes(req.user.role)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Only hospital doctors can send clinical results.",
+    };
+  }
+  const uid =
+    req.user.hospitalId != null ? Number(req.user.hospitalId) : null;
+  const fromOrg =
+    access.row.from_facility_hospital_id != null
+      ? Number(access.row.from_facility_hospital_id)
+      : null;
+  if (uid != null && fromOrg != null && uid === fromOrg) {
+    return { ok: true, row: access.row };
+  }
+  return {
+    ok: false,
+    status: 403,
+    error: "Only the destination hospital doctor can send clinical results.",
+  };
+}
+
+async function assertDoctorSideAccess(req, requestId) {
+  const access = await assertRequestAccess(req, requestId);
+  if (!access.ok) {
+    return access;
+  }
+  if (!["physician", "hospital_admin"].includes(req.user.role)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Doctor-side action only.",
+    };
+  }
+  return access;
 }
 
 // Create a new equipment request
@@ -167,10 +286,28 @@ const requestEquipment = async (req, res) => {
        LEFT JOIN facilities rf ON er.from_facility = rf.id
        LEFT JOIN facilities tf ON er.to_facility = tf.id
        LEFT JOIN equipment e ON er.equipment_id = e.id
-       WHERE er.id = $1`,
+       WHERE er.id = $1::integer`,
       [request.id],
     );
-    res.status(201).json(result.rows[0]);
+    const row = result.rows[0];
+    let warning = null;
+    const busy = await pool.query(
+      `SELECT EXISTS (
+        SELECT 1 FROM equipment_requests er
+        WHERE er.equipment_id = $1::integer
+          AND er.status IN ('approved', 'results-sent')
+          AND (
+            er.equipment_booking_end_at IS NULL
+            OR er.equipment_booking_end_at > NOW()
+          )
+      ) AS x`,
+      [equipment_id],
+    );
+    if (busy.rows[0]?.x) {
+      warning =
+        "This equipment already has an active approved booking on the network. You can still submit; coordinate timing with the equipment hospital.";
+    }
+    res.status(201).json(warning ? { ...row, warning } : row);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -199,7 +336,7 @@ const getRequestById = async (req, res) => {
        LEFT JOIN facilities tf ON er.to_facility = tf.id
        LEFT JOIN equipment e ON er.equipment_id = e.id
        LEFT JOIN equipment_request_results err ON err.equipment_request_id = er.id
-       WHERE er.id = $1`,
+       WHERE er.id = $1::integer`,
       [id],
     );
     if (result.rows.length === 0) {
@@ -234,9 +371,9 @@ const getAllRequests = async (req, res) => {
     const params = [];
     if (role !== "super_admin") {
       sql += ` WHERE (
-        er.hospital_id = $1
-        OR EXISTS (SELECT 1 FROM facilities tfx WHERE tfx.id = er.to_facility AND tfx.hospital_id = $1)
-        OR EXISTS (SELECT 1 FROM facilities rfx WHERE rfx.id = er.from_facility AND rfx.hospital_id = $1)
+        er.hospital_id = $1::integer
+        OR EXISTS (SELECT 1 FROM facilities tfx WHERE tfx.id = er.to_facility AND tfx.hospital_id = $1::integer)
+        OR EXISTS (SELECT 1 FROM facilities rfx WHERE rfx.id = er.from_facility AND rfx.hospital_id = $1::integer)
       )`;
       params.push(hospitalId);
     }
@@ -253,22 +390,53 @@ const updateRequestStatus = async (req, res) => {
   const { id } = req.params;
   const { status, rejection_reason } = req.body;
 
-  const access = await assertRequestAccess(req, id);
+  const access = await assertDecisionAccess(req, id);
   if (!access.ok) {
     return res.status(access.status).json({ error: access.error });
   }
+  if (!["approved", "rejected"].includes(String(status || ""))) {
+    return res.status(400).json({
+      error: "Invalid status. Only 'approved' or 'rejected' are supported.",
+    });
+  }
+  if (access.row?.status !== "pending") {
+    return res.status(400).json({
+      error: "Only pending requests can be approved or rejected.",
+    });
+  }
 
   try {
+    let warning = null;
+    if (status === "approved") {
+      const dup = await pool.query(
+        `SELECT COUNT(*)::int AS c FROM equipment_requests
+         WHERE equipment_id = (SELECT equipment_id FROM equipment_requests WHERE id = $1::integer)
+           AND status IN ('approved', 'results-sent')
+           AND id <> $2::integer`,
+        [id, id],
+      );
+      if ((dup.rows[0]?.c ?? 0) > 0) {
+        warning =
+          "Another request for this equipment is already approved. Multiple approved bookings may overlap; coordinate visit times.";
+      }
+    }
+
     const result = await pool.query(
-      "UPDATE equipment_requests SET status = $1, approved_at = NOW(), rejection_reason = $2 WHERE id = $3 RETURNING *",
-      [status, rejection_reason, id],
+      `UPDATE equipment_requests
+       SET status = $1::text,
+           approved_at = CASE WHEN $1::text = 'approved' THEN NOW() ELSE NULL END,
+           rejection_reason = CASE WHEN $1::text = 'rejected' THEN $2 ELSE NULL END
+       WHERE id = $3::integer
+       RETURNING *`,
+      [status, rejection_reason?.trim() || null, id],
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Request not found" });
     }
 
-    res.json(result.rows[0]);
+    const row = result.rows[0];
+    res.json(warning ? { ...row, warning } : row);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -276,7 +444,11 @@ const updateRequestStatus = async (req, res) => {
 
 const schedulePatientVisit = async (req, res) => {
   const { id } = req.params;
-  const { patient_visit_at, patient_visit_instructions } = req.body;
+  const {
+    patient_visit_at,
+    patient_visit_instructions,
+    equipment_booking_end_at,
+  } = req.body;
 
   const access = await assertScheduleAccess(req, id);
   if (!access.ok) {
@@ -295,32 +467,69 @@ const schedulePatientVisit = async (req, res) => {
     return res.status(400).json({ error: "patient_visit_at is required" });
   }
 
+  if (
+    !equipment_booking_end_at ||
+    String(equipment_booking_end_at).trim() === ""
+  ) {
+    return res.status(400).json({ error: "equipment_booking_end_at is required" });
+  }
+
   const visitDate = new Date(patient_visit_at);
   if (Number.isNaN(visitDate.getTime())) {
     return res.status(400).json({ error: "Invalid patient_visit_at" });
   }
 
+  const endDate = new Date(equipment_booking_end_at);
+  if (Number.isNaN(endDate.getTime())) {
+    return res.status(400).json({ error: "Invalid equipment_booking_end_at" });
+  }
+
+  if (!(endDate > visitDate)) {
+    return res.status(400).json({
+      error: "equipment_booking_end_at must be after patient_visit_at",
+    });
+  }
+
+  const equipmentId = access.row.equipment_id;
+  if (equipmentId == null) {
+    return res.status(400).json({ error: "Request is missing equipment_id" });
+  }
+
   try {
+    const warning = await findVisitOverlapWarning(
+      pool,
+      equipmentId,
+      Number(id),
+      visitDate.toISOString(),
+      endDate.toISOString(),
+    );
+
     const upd = await pool.query(
       `UPDATE equipment_requests
        SET patient_visit_at = $1,
            patient_visit_instructions = $2,
+           equipment_booking_end_at = $3,
            patient_visit_set_at = NOW()
-       WHERE id = $3
+       WHERE id = $4::integer
        RETURNING *`,
       [
         visitDate.toISOString(),
         patient_visit_instructions?.trim() || null,
+        endDate.toISOString(),
         id,
       ],
     );
     if (upd.rows.length === 0) {
       return res.status(404).json({ error: "Request not found" });
     }
-    res.json({
+    const payload = {
       message: "Patient visit saved.",
       request: upd.rows[0],
-    });
+    };
+    if (warning) {
+      payload.warning = warning;
+    }
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -347,6 +556,11 @@ function buildReportText(row) {
   if (row.patient_visit_instructions) {
     lines.push(`Instructions: ${row.patient_visit_instructions}`);
   }
+  if (row.equipment_booking_end_at) {
+    lines.push(
+      `Equipment available again (network): ${new Date(row.equipment_booking_end_at).toLocaleString(undefined, { dateStyle: "full", timeStyle: "short" })}`,
+    );
+  }
   lines.push("");
   if (row.result_diagnosis_findings || row.result_notes_report) {
     lines.push("Clinical report");
@@ -365,9 +579,9 @@ function buildReportText(row) {
   return lines.join("\n");
 }
 
-const downloadRequestReport = async (req, res) => {
+const downloadVisitSummary = async (req, res) => {
   const { id } = req.params;
-  const access = await assertRequestAccess(req, id);
+  const access = await assertDoctorSideAccess(req, id);
   if (!access.ok) {
     return res.status(access.status).json({ error: access.error });
   }
@@ -386,29 +600,102 @@ const downloadRequestReport = async (req, res) => {
        LEFT JOIN facilities tf ON er.to_facility = tf.id
        LEFT JOIN equipment e ON er.equipment_id = e.id
        LEFT JOIN equipment_request_results err ON err.equipment_request_id = er.id
-       WHERE er.id = $1`,
+       WHERE er.id = $1::integer`,
       [id],
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Request not found" });
     }
     const row = result.rows[0];
-    const hasContent =
-      row.patient_visit_at ||
-      row.result_diagnosis_findings ||
-      row.result_notes_report;
-    if (!hasContent) {
+    if (!row.patient_visit_at) {
       return res.status(400).json({
-        error:
-          "Nothing to download yet. Schedule the patient visit or submit clinical results first.",
+        error: "No visit summary yet. Schedule the patient visit first.",
       });
     }
 
-    const text = buildReportText(row);
+    const visitLines = [
+      "MedBridge — Patient visit summary",
+      `Request ID: ${row.id}`,
+      `Equipment: ${row.equipment_name || "—"}`,
+      `From: ${row.from_facility_name || "—"}`,
+      `To: ${row.to_facility_name || "—"}`,
+      "",
+      `Visit time: ${new Date(row.patient_visit_at).toLocaleString(undefined, {
+        dateStyle: "full",
+        timeStyle: "short",
+      })}`,
+      `Instructions: ${row.patient_visit_instructions || "—"}`,
+      "",
+      row.equipment_booking_end_at
+        ? `Equipment available again (network): ${new Date(row.equipment_booking_end_at).toLocaleString(undefined, {
+            dateStyle: "full",
+            timeStyle: "short",
+          })}`
+        : "",
+      "",
+      "— Generated by MedBridge",
+    ].filter((line) => line !== "");
+    const text = visitLines.join("\n");
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="medbridge-request-${id}-report.txt"`,
+      `attachment; filename="medbridge-request-${id}-visit-summary.txt"`,
+    );
+    res.send(text);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const downloadClinicalResult = async (req, res) => {
+  const { id } = req.params;
+  const access = await assertDoctorSideAccess(req, id);
+  if (!access.ok) {
+    return res.status(access.status).json({ error: access.error });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT er.id, e.name AS equipment_name, rf.name AS from_facility_name, tf.name AS to_facility_name,
+              err.diagnosis_findings AS result_diagnosis_findings,
+              err.notes_report AS result_notes_report,
+              err.attachment AS result_attachment
+       FROM equipment_requests er
+       LEFT JOIN facilities rf ON er.from_facility = rf.id
+       LEFT JOIN facilities tf ON er.to_facility = tf.id
+       LEFT JOIN equipment e ON er.equipment_id = e.id
+       LEFT JOIN equipment_request_results err ON err.equipment_request_id = er.id
+       WHERE er.id = $1::integer`,
+      [id],
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+    const row = result.rows[0];
+    if (!row.result_diagnosis_findings && !row.result_notes_report) {
+      return res.status(400).json({
+        error: "No clinical result yet. Send clinical results first.",
+      });
+    }
+
+    const resultLines = [
+      "MedBridge — Clinical result",
+      `Request ID: ${row.id}`,
+      `Equipment: ${row.equipment_name || "—"}`,
+      `From: ${row.from_facility_name || "—"}`,
+      `To: ${row.to_facility_name || "—"}`,
+      "",
+      `Findings: ${row.result_diagnosis_findings || "—"}`,
+      `Notes: ${row.result_notes_report || "—"}`,
+      `Attachment: ${row.result_attachment || "—"}`,
+      "",
+      "— Generated by MedBridge",
+    ];
+    const text = resultLines.join("\n");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="medbridge-request-${id}-clinical-result.txt"`,
     );
     res.send(text);
   } catch (err) {
@@ -423,7 +710,7 @@ const sendRequestResult = async (req, res) => {
     ? `/uploads/${req.file.filename}`
     : attachment || null;
 
-  const access = await assertRequestAccess(req, id);
+  const access = await assertResultsAccess(req, id);
   if (!access.ok) {
     return res.status(access.status).json({ error: access.error });
   }
@@ -436,7 +723,7 @@ const sendRequestResult = async (req, res) => {
 
   try {
     const requestCheck = await pool.query(
-      "SELECT id, status FROM equipment_requests WHERE id = $1",
+      "SELECT id, status FROM equipment_requests WHERE id = $1::integer",
       [id],
     );
 
@@ -453,7 +740,7 @@ const sendRequestResult = async (req, res) => {
     }
 
     const existingResult = await pool.query(
-      "SELECT id FROM equipment_request_results WHERE equipment_request_id = $1",
+      "SELECT id FROM equipment_request_results WHERE equipment_request_id = $1::integer",
       [id],
     );
 
@@ -462,7 +749,7 @@ const sendRequestResult = async (req, res) => {
       const updateResult = await pool.query(
         `UPDATE equipment_request_results
          SET diagnosis_findings = $1, notes_report = $2, attachment = $3, updated_at = NOW()
-         WHERE equipment_request_id = $4
+         WHERE equipment_request_id = $4::integer
          RETURNING *`,
         [diagnosis_findings, notes_report, uploadedAttachment, id],
       );
@@ -470,7 +757,7 @@ const sendRequestResult = async (req, res) => {
     } else {
       const insertResult = await pool.query(
         `INSERT INTO equipment_request_results (equipment_request_id, diagnosis_findings, notes_report, attachment)
-         VALUES ($1, $2, $3, $4)
+         VALUES ($1::integer, $2, $3, $4)
          RETURNING *`,
         [id, diagnosis_findings, notes_report, uploadedAttachment],
       );
@@ -478,7 +765,7 @@ const sendRequestResult = async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE equipment_requests SET status = 'results-sent' WHERE id = $1`,
+      `UPDATE equipment_requests SET status = 'results-sent' WHERE id = $1::integer`,
       [id],
     );
 
@@ -502,7 +789,7 @@ const sendRequestResult = async (req, res) => {
 const getRequestResult = async (req, res) => {
   const { id } = req.params;
 
-  const access = await assertRequestAccess(req, id);
+  const access = await assertDoctorSideAccess(req, id);
   if (!access.ok) {
     return res.status(access.status).json({ error: access.error });
   }
@@ -515,7 +802,7 @@ const getRequestResult = async (req, res) => {
        LEFT JOIN equipment e ON er.equipment_id = e.id
        LEFT JOIN facilities rf ON er.from_facility = rf.id
        LEFT JOIN facilities tf ON er.to_facility = tf.id
-       WHERE rr.equipment_request_id = $1`,
+       WHERE rr.equipment_request_id = $1::integer`,
       [id],
     );
 
@@ -537,7 +824,8 @@ module.exports = {
   getAllRequests,
   updateRequestStatus,
   schedulePatientVisit,
-  downloadRequestReport,
+  downloadVisitSummary,
+  downloadClinicalResult,
   sendRequestResult,
   getRequestResult,
 };

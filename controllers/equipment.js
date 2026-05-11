@@ -69,7 +69,32 @@ const addEquipment = async (req, res) => {
 const getAvailableEquipment = async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT e.*, f.name AS facility_name, f.hospital_id, h.name AS hospital_name
+      `SELECT e.*, f.name AS facility_name, f.hospital_id, h.name AS hospital_name,
+          CASE
+            WHEN NOT e.availability THEN 'maintenance'
+            WHEN EXISTS (
+              SELECT 1 FROM equipment_requests er
+              WHERE er.equipment_id = e.id
+                AND er.status IN ('approved', 'results-sent')
+                AND er.equipment_booking_end_at IS NULL
+            ) THEN 'reserved'
+            WHEN EXISTS (
+              SELECT 1 FROM equipment_requests er
+              WHERE er.equipment_id = e.id
+                AND er.status IN ('approved', 'results-sent')
+                AND er.equipment_booking_end_at IS NOT NULL
+                AND er.equipment_booking_end_at > NOW()
+            ) THEN 'booked'
+            ELSE 'open'
+          END AS network_availability,
+          (
+            SELECT MAX(er.equipment_booking_end_at)::timestamptz
+            FROM equipment_requests er
+            WHERE er.equipment_id = e.id
+              AND er.status IN ('approved', 'results-sent')
+              AND er.equipment_booking_end_at IS NOT NULL
+              AND er.equipment_booking_end_at > NOW()
+          ) AS network_available_from
        FROM equipment e
        JOIN facilities f ON e.facility_id = f.id
        LEFT JOIN hospitals h ON f.hospital_id = h.id`,

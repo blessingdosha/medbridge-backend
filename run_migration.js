@@ -19,6 +19,11 @@ async function migrate() {
     "sql",
     "hospital_location_migration.sql",
   );
+  const equipmentBookingEndPath = path.join(
+    __dirname,
+    "sql",
+    "equipment_booking_end_migration.sql",
+  );
   await pool.query(fs.readFileSync(tenancyPath, "utf8"));
   console.log("Tenancy migration applied successfully.");
   await pool.query(fs.readFileSync(patientPath, "utf8"));
@@ -27,6 +32,8 @@ async function migrate() {
   console.log("Equipment request patient visit migration applied successfully.");
   await pool.query(fs.readFileSync(hospitalLocationPath, "utf8"));
   console.log("Hospital location migration applied successfully.");
+  await pool.query(fs.readFileSync(equipmentBookingEndPath, "utf8"));
+  console.log("Equipment booking end migration applied successfully.");
 }
 
 migrate()
